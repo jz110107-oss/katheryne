@@ -911,9 +911,9 @@ def commission_blocks(guild_id: int, uid: int) -> list:
                 "SELECT 1 FROM donut_optouts WHERE guild_id=? AND user_id=?", (guild_id, uid)
             ).fetchone()
             blocks.append(
-                "🍩 ❌ Opt in to be matched for Donut Buddies"
+                "🍩 **Donut Buddies** ❌ Opt in to be matched"
                 if opted_out
-                else "🍩 ❌ Wait to be matched with a buddy"
+                else "🍩 **Donut Buddies** ❌ Wait to be matched with a buddy"
             )
     else:
         buddies = " & ".join(f"<@{i}>" for i in group_members(mine) if i != uid)
@@ -924,16 +924,17 @@ def commission_blocks(guild_id: int, uid: int) -> list:
                 (guild_id, uid, str(mine["id"])),
             ).fetchone()
             if a:
-                blocks.append(f"🍩 ✅ +{a['amount']} {g}")
+                blocks.append(f"🍩 **Donut Buddies** ✅ +{a['amount']} {g}")
             else:
-                blocks.append("🍩 ❌ Reward not recorded; ask an admin to check")
+                blocks.append("🍩 **Donut Buddies** ❌ Reward not recorded; ask an admin to check")
         elif mine["status"] == "prompted":
             blocks.append(
-                f"🍩 ❌ Answer Katheryne in <#{mine['channel_id']}> to claim your reward"
+                f"🍩 **Donut Buddies** ❌ Answer Katheryne in <#{mine['channel_id']}> "
+                "to claim your reward"
             )
         else:
             blocks.append(
-                f"🍩 ❌ Meet with {buddies}, share a meal, then post a photo "
+                f"🍩 **Donut Buddies** ❌ Meet with {buddies}, share a meal, then post a photo "
                 f"in <#{mine['channel_id']}>"
             )
 
@@ -948,10 +949,11 @@ def commission_blocks(guild_id: int, uid: int) -> list:
             (guild_id, uid, cid),
         ).fetchone()
         if done:
-            blocks.append(f"📸 ✅ +{done['amount']} {g}")
+            blocks.append(f"📸 **Photo of the Week** ✅ +{done['amount']} {g}")
         else:
             blocks.append(
-                f"📸 ❌ Post a photo to <#{cfg_int(guild_id, 'potw_channel')}> "
+                f"📸 **Photo of the Week** ❌ Post a photo to "
+                f"<#{cfg_int(guild_id, 'potw_channel')}> "
                 f"for this week's theme: *{theme}*"
             )
 
@@ -965,10 +967,11 @@ def commission_blocks(guild_id: int, uid: int) -> list:
             (guild_id, uid, cs.astimezone(timezone.utc).isoformat()),
         ).fetchone()
         if done["amount"]:
-            blocks.append(f"📰 ✅ +{done['amount']} {g}")
+            blocks.append(f"📰 **Weekly Recap** ✅ +{done['amount']} {g}")
         else:
             blocks.append(
-                f"📰 ❌ React to this week's recap in <#{cfg_int(guild_id, 'recap_channel')}>"
+                f"📰 **Weekly Recap** ❌ React to this week's recap in "
+                f"<#{cfg_int(guild_id, 'recap_channel')}>"
             )
 
     # Office Hours (marked present by an admin this cycle)
@@ -981,12 +984,9 @@ def commission_blocks(guild_id: int, uid: int) -> list:
             (guild_id, uid, cid),
         ).fetchone()
         if done:
-            blocks.append(f"🕐 ✅ +{done['amount']} {g}")
+            blocks.append(f"🕐 **Office Hours** ✅ +{done['amount']} {g}")
         else:
-            blocks.append(
-                f"🕐 ❌ Stop by office hours in <#{cfg_int(guild_id, 'office_channel')}> "
-                "and ask an admin to mark your attendance"
-            )
+            blocks.append("🕐 **Office Hours** ❌ Come to office hours")
     return blocks
 
 
