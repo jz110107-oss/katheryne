@@ -114,6 +114,7 @@ Katheryne doesn't ping anyone, except the pair inside their private Donut Buddie
    - Send Messages
    - Embed Links
    - Read Message History
+   - Manage Messages (to pin the current Photo of the Week prompt)
    - Manage Channels (to create and delete donut channels)
 5. Open the generated URL and add the bot to your server.
 

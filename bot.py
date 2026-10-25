@@ -678,6 +678,17 @@ async def post_theme(guild: discord.Guild, cycle_id: str, cycle_start: datetime)
     if channel is None:
         return False
     gid = guild.id
+    old_message = None
+    old_message_id = get_cfg(gid, "potw_message")
+    if old_message_id:
+        try:
+            old_message = await channel.fetch_message(int(old_message_id))
+        except discord.NotFound:
+            pass
+        except discord.HTTPException as e:
+            print(f"Could not fetch previous Photo of the Week prompt: {e}")
+            return False
+
     theme = pick_theme(gid)
     reset_ts = next_reset_ts(gid, cycle_start)
     embed = discord.Embed(
@@ -697,6 +708,17 @@ async def post_theme(guild: discord.Guild, cycle_id: str, cycle_start: datetime)
     set_cfg(gid, "potw_cycle", cycle_id)
     set_cfg(gid, "potw_theme", theme)
     set_cfg(gid, "potw_message", msg.id)
+    try:
+        await msg.pin(reason="Katheryne: current Photo of the Week prompt")
+    except discord.HTTPException as e:
+        print(f"Could not pin the current Photo of the Week prompt: {e}")
+    if old_message is not None:
+        try:
+            await old_message.delete()
+        except discord.NotFound:
+            pass
+        except discord.HTTPException as e:
+            print(f"Could not delete previous Photo of the Week prompt: {e}")
     return True
 
 
@@ -867,7 +889,7 @@ def rank_badge(rank: int) -> str:
 # Adventurer's Guild embed and personal card
 # ----------------------------------------------------------------------------
 def commission_blocks(guild_id: int, uid: int) -> list:
-    """One block of text per weekly commission."""
+    """One status and action or reward per weekly commission."""
     g = gem(guild_id)
     cs = cycle_start_for(guild_id, datetime.now(timezone.utc))
     cid = cs.isoformat()
@@ -889,9 +911,9 @@ def commission_blocks(guild_id: int, uid: int) -> list:
                 "SELECT 1 FROM donut_optouts WHERE guild_id=? AND user_id=?", (guild_id, uid)
             ).fetchone()
             blocks.append(
-                "🍩 **Donut Buddies**: 💤 you opted out this week"
+                "🍩 ❌ Opt in to be matched for Donut Buddies"
                 if opted_out
-                else "🍩 **Donut Buddies**: 💤 not matched this week"
+                else "🍩 ❌ Wait to be matched with a buddy"
             )
     else:
         buddies = " & ".join(f"<@{i}>" for i in group_members(mine) if i != uid)
@@ -901,14 +923,19 @@ def commission_blocks(guild_id: int, uid: int) -> list:
                 "AND source='donut' AND key=?",
                 (guild_id, uid, str(mine["id"])),
             ).fetchone()
-            got = f" (+{a['amount']} {g})" if a else ""
-            blocks.append(f"🍩 **Donut Buddies**: ✅ completed with {buddies}{got}")
+            if a:
+                blocks.append(f"🍩 ✅ +{a['amount']} {g}")
+            else:
+                blocks.append("🍩 ❌ Reward not recorded; ask an admin to check")
         elif mine["status"] == "prompted":
             blocks.append(
-                f"🍩 **Donut Buddies**: ⏳ photo received. Answer Katheryne in your channel! ({buddies})"
+                f"🍩 ❌ Answer Katheryne in <#{mine['channel_id']}> to claim your reward"
             )
         else:
-            blocks.append(f"🍩 **Donut Buddies**: ❌ not yet. Meet up with {buddies}")
+            blocks.append(
+                f"🍩 ❌ Meet with {buddies}, share a meal, then post a photo "
+                f"in <#{mine['channel_id']}>"
+            )
 
     # Photo of the Week
     if not cfg_int(guild_id, "potw_channel") or not feature_on(guild_id, "potw"):
@@ -916,42 +943,50 @@ def commission_blocks(guild_id: int, uid: int) -> list:
     else:
         theme = get_cfg(guild_id, "potw_theme") or "TBA"
         done = db.execute(
-            "SELECT 1 FROM awards WHERE guild_id=? AND user_id=? AND source='potw' AND key=?",
+            "SELECT amount FROM awards WHERE guild_id=? AND user_id=? "
+            "AND source='potw' AND key=?",
             (guild_id, uid, cid),
         ).fetchone()
         if done:
-            blocks.append(f"📸 **Photo of the Week**: ✅ done (+{POTW_GEMS} {g}). *{theme}*")
+            blocks.append(f"📸 ✅ +{done['amount']} {g}")
         else:
-            blocks.append(f"📸 **Photo of the Week**: ❌ not yet. Theme: *{theme}*")
+            blocks.append(
+                f"📸 ❌ Post a photo to <#{cfg_int(guild_id, 'potw_channel')}> "
+                f"for this week's theme: *{theme}*"
+            )
 
     # Weekly Recap (reacted to a recap posted this cycle)
     if not cfg_int(guild_id, "recap_channel") or not feature_on(guild_id, "recap"):
         blocks.append("📰 No Weekly Recap this week")
     else:
-        done = any(
-            datetime.fromisoformat(r["created_at"]) >= cs
-            for r in db.execute(
-                "SELECT created_at FROM awards WHERE guild_id=? AND user_id=? AND source='recap'",
-                (guild_id, uid),
-            )
-        )
-        if done:
-            blocks.append(f"📰 **Weekly Recap**: ✅ read (+{RECAP_GEMS} {g})")
+        done = db.execute(
+            "SELECT SUM(amount) AS amount FROM awards "
+            "WHERE guild_id=? AND user_id=? AND source='recap' AND created_at>=?",
+            (guild_id, uid, cs.astimezone(timezone.utc).isoformat()),
+        ).fetchone()
+        if done["amount"]:
+            blocks.append(f"📰 ✅ +{done['amount']} {g}")
         else:
-            blocks.append("📰 **Weekly Recap**: ❌ not yet. React to this week's recap")
+            blocks.append(
+                f"📰 ❌ React to this week's recap in <#{cfg_int(guild_id, 'recap_channel')}>"
+            )
 
     # Office Hours (marked present by an admin this cycle)
     if not cfg_int(guild_id, "office_channel") or not feature_on(guild_id, "office"):
         blocks.append("🕐 No Office Hours this week")
     else:
         done = db.execute(
-            "SELECT 1 FROM awards WHERE guild_id=? AND user_id=? AND source='office' AND key=?",
+            "SELECT amount FROM awards WHERE guild_id=? AND user_id=? "
+            "AND source='office' AND key=?",
             (guild_id, uid, cid),
         ).fetchone()
         if done:
-            blocks.append(f"🕐 **Office Hours**: ✅ attended (+{OFFICE_GEMS} {g})")
+            blocks.append(f"🕐 ✅ +{done['amount']} {g}")
         else:
-            blocks.append("🕐 **Office Hours**: ❌ not yet. Stop by this week!")
+            blocks.append(
+                f"🕐 ❌ Stop by office hours in <#{cfg_int(guild_id, 'office_channel')}> "
+                "and ask an admin to mark your attendance"
+            )
     return blocks
 
 
@@ -967,17 +1002,25 @@ def build_card(guild_id: int, user) -> discord.Embed:
     sections = [
         f"# Ad astra abyssosque!\n\n"
         f"Welcome to the Adventurer's Guild, **{user.display_name}**. Here is your record.",
-        f"## {weekly_gems} {g} earned this week",
+        f"You earned {weekly_gems} {g} this week.",
         f"## {g} Primogems\n"
-        + (f"**{gem_rank[1]}**, rank #{gem_rank[0]}" if gem_rank else "**0**, unranked"),
+        + (
+            f"You have {gem_rank[1]} {g}. You are rank #{gem_rank[0]}."
+            if gem_rank
+            else f"You have 0 {g}. You are unranked."
+        ),
         "## 🎯 Snipes\n"
         + (
-            f"**{stats['sniper_cnt'][uid]}** snipes, rank #{sniping[0]}"
+            f"You sniped {stats['sniper_cnt'][uid]} people. You are rank #{sniping[0]}."
             if sniping
-            else "**0** snipes, unranked"
+            else "You sniped 0 people. You are unranked."
         ),
         "## 👀 Times Sniped\n"
-        + (f"**{sniped[1]}** times, rank #{sniped[0]}" if sniped else "**0** times, unranked"),
+        + (
+            f"You were sniped {sniped[1]} times. You are rank #{sniped[0]}."
+            if sniped
+            else "You were sniped 0 times. You are unranked."
+        ),
         "## 📜 This Week's Commissions\n\n"
         + "\n\n".join(f"> {commission}" for commission in commission_blocks(guild_id, uid)),
     ]
