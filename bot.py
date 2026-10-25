@@ -37,7 +37,7 @@ OFFICE_GEMS = 3
 RECAP_GEMS = 1
 
 DEFAULT_RESET_WEEKDAY = 6  # Monday=0 ... Sunday=6
-DEFAULT_RESET_TIME = "18:00"
+DEFAULT_RESET_TIME = "13:00"
 
 BUILTIN_THEMES = [
     "Something blue",
@@ -72,6 +72,9 @@ db.executescript(
     CREATE TABLE IF NOT EXISTS config (
         guild_id INTEGER, key TEXT, value TEXT,
         PRIMARY KEY (guild_id, key)
+    );
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+        name TEXT PRIMARY KEY
     );
     CREATE TABLE IF NOT EXISTS point_values (
         guild_id INTEGER, user_id INTEGER, points INTEGER,
@@ -108,6 +111,35 @@ db.executescript(
     """
 )
 db.commit()
+
+RESET_TIME_MIGRATION = "default_sunday_reset_13"
+if not db.execute(
+    "SELECT 1 FROM schema_migrations WHERE name=?", (RESET_TIME_MIGRATION,)
+).fetchone():
+    db.execute(
+        """
+        UPDATE config
+        SET value=?
+        WHERE key='reset_time' AND value='18:00'
+          AND (
+              NOT EXISTS (
+                  SELECT 1 FROM config AS weekday
+                  WHERE weekday.guild_id=config.guild_id
+                    AND weekday.key='reset_weekday'
+              )
+              OR EXISTS (
+                  SELECT 1 FROM config AS weekday
+                  WHERE weekday.guild_id=config.guild_id
+                    AND weekday.key='reset_weekday' AND weekday.value='6'
+              )
+          )
+        """,
+        (DEFAULT_RESET_TIME,),
+    )
+    db.execute(
+        "INSERT INTO schema_migrations (name) VALUES (?)", (RESET_TIME_MIGRATION,)
+    )
+    db.commit()
 
 
 def get_cfg(guild_id, key):
@@ -932,14 +964,11 @@ def build_guild_embed(guild_id: int) -> discord.Embed:
         and get_cfg(guild_id, "potw_theme")
     ):
         desc.append(f"📸 **Photo of the Week:** {get_cfg(guild_id, 'potw_theme')}")
-    desc.append(
-        "🍩 **Donut Buddies:** " + ("running" if donuts_active(guild_id, cs) else "not running")
-    )
     desc.append(f"🔄 **Next weekly reset:** <t:{reset_ts}:F> (<t:{reset_ts}:R>)")
 
     embed = discord.Embed(
         title="⚔️ Adventurer's Guild",
-        description="\n".join(desc),
+        description="\n\n".join(desc),
         color=discord.Color.gold(),
         timestamp=datetime.now(timezone.utc),
     )
