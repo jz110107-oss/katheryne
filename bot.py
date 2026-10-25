@@ -967,7 +967,7 @@ def build_card(guild_id: int, user) -> discord.Embed:
     sections = [
         f"# Ad astra abyssosque!\n\n"
         f"Welcome to the Adventurer's Guild, **{user.display_name}**. Here is your record.",
-        f"{weekly_gems} Primogems earned this week",
+        f"## {weekly_gems} {g} earned this week",
         f"## {g} Primogems\n"
         + (f"**{gem_rank[1]}**, rank #{gem_rank[0]}" if gem_rank else "**0**, unranked"),
         "## 🎯 Snipes\n"
