@@ -770,6 +770,42 @@ def load_awards(guild_id):
     return out
 
 
+def gems_earned_this_cycle(guild_id: int, user_id: int) -> int:
+    """Primogems earned by a user since the current weekly reset."""
+    cycle_start = cycle_start_for(guild_id, datetime.now(timezone.utc))
+    season_start, season_end = period_bounds(guild_id)
+    total = 0
+
+    rows = db.execute(
+        """
+        SELECT s.created_at, COALESCE(p.points, 1) AS points
+        FROM snipes AS s
+        LEFT JOIN point_values AS p
+          ON p.guild_id = s.guild_id AND p.user_id = s.sniped_id
+        WHERE s.guild_id=? AND s.sniper_id=?
+        """,
+        (guild_id, user_id),
+    )
+    for row in rows:
+        created_at = datetime.fromisoformat(row["created_at"])
+        if created_at >= cycle_start and (
+            season_start is None or created_at >= season_start
+        ) and (season_end is None or created_at < season_end):
+            total += row["points"]
+
+    rows = db.execute(
+        "SELECT amount, created_at FROM awards WHERE guild_id=? AND user_id=?",
+        (guild_id, user_id),
+    )
+    for row in rows:
+        created_at = datetime.fromisoformat(row["created_at"])
+        if created_at >= cycle_start and (
+            season_start is None or created_at >= season_start
+        ) and (season_end is None or created_at < season_end):
+            total += row["amount"]
+    return total
+
+
 def ranked(scores: dict):
     """Competition ranking (ties share a rank). Returns [(rank, user_id, score)]."""
     items = sorted(
@@ -926,27 +962,29 @@ def build_card(guild_id: int, user) -> discord.Embed:
     gem_rank = rank_of(stats["gem_rows"], uid)
     sniping = rank_of(stats["sniper_rows"], uid)
     sniped = rank_of(stats["sniped_rows"], uid)
+    weekly_gems = gems_earned_this_cycle(guild_id, uid)
 
     sections = [
+        f"# Ad astra abyssosque!\n\n"
         f"Welcome to the Adventurer's Guild, **{user.display_name}**. Here is your record.",
-        f"{g} **Primogems**\n"
+        f"## {g} Primogems\n"
         + (f"**{gem_rank[1]}**, rank #{gem_rank[0]}" if gem_rank else "**0**, unranked"),
-        "🎯 **Snipes**\n"
+        f"## {g} Primogems Earned This Week\n**{weekly_gems}** {g}",
+        "## 🎯 Snipes\n"
         + (
             f"**{stats['sniper_cnt'][uid]}** snipes, rank #{sniping[0]}"
             if sniping
             else "**0** snipes, unranked"
         ),
-        "👀 **Times Sniped**\n"
+        "## 👀 Times Sniped\n"
         + (f"**{sniped[1]}** times, rank #{sniped[0]}" if sniped else "**0** times, unranked"),
-        "📜 **This Week's Commissions**\n\n" + "\n\n".join(commission_blocks(guild_id, uid)),
+        "## 📜 This Week's Commissions\n\n"
+        + "\n\n".join(f"> {commission}" for commission in commission_blocks(guild_id, uid)),
     ]
     embed = discord.Embed(
-        title="Ad astra abyssosque!",
         description="\n\n".join(sections),
         color=discord.Color.gold(),
     )
-    embed.set_author(name="Katheryne, Adventurer's Guild")
     embed.set_footer(text=f"Season: {period_label(guild_id)}")
     return embed
 
@@ -957,48 +995,33 @@ def build_guild_embed(guild_id: int) -> discord.Embed:
     cs = cycle_start_for(guild_id, datetime.now(timezone.utc))
     reset_ts = next_reset_ts(guild_id, cs)
 
-    desc = [f"**Season:** {period_label(guild_id)}"]
-    if (
-        cfg_int(guild_id, "potw_channel")
-        and feature_on(guild_id, "potw")
-        and get_cfg(guild_id, "potw_theme")
-    ):
-        desc.append(f"📸 **Photo of the Week:** {get_cfg(guild_id, 'potw_theme')}")
-    desc.append(f"🔄 **Next weekly reset:** <t:{reset_ts}:F> (<t:{reset_ts}:R>)")
-
-    embed = discord.Embed(
-        title="⚔️ Adventurer's Guild",
-        description="\n\n".join(desc),
-        color=discord.Color.gold(),
-        timestamp=datetime.now(timezone.utc),
-    )
+    sections = [
+        "# ⚔️ Adventurer's Guild\n\n"
+        f"**Season:** {period_label(guild_id)}\n"
+        f"🔄 **Next weekly reset:** <t:{reset_ts}:F> (<t:{reset_ts}:R>)"
+    ]
 
     gem_lines = [
         f"{rank_badge(r)} <@{uid}> — **{n}** {g}" for r, uid, n in stats["gem_rows"][:TOP_N]
     ]
-    embed.add_field(
-        name=f"{g} Primogem Leaderboard",
-        value="\n".join(gem_lines) or "No primogems earned yet!",
-        inline=False,
+    sections.append(
+        f"## {g} Primogem Leaderboard\n"
+        + ("\n".join(gem_lines) or "No primogems earned yet!")
     )
 
     sniper_lines = [
-        f"{rank_badge(r)} <@{uid}> — **{stats['sniper_cnt'][uid]}** snipes ({pts} {g})"
-        for r, uid, pts in stats["sniper_rows"][:TOP_N]
+        f"{rank_badge(r)} <@{uid}> — **{stats['sniper_cnt'][uid]}** snipes"
+        for r, uid, _ in stats["sniper_rows"][:TOP_N]
     ]
-    embed.add_field(
-        name="🎯 Top Snipers",
-        value="\n".join(sniper_lines) or "No snipes yet!",
-        inline=False,
+    sections.append(
+        "## 🎯 Top Snipers\n" + ("\n".join(sniper_lines) or "No snipes yet!")
     )
 
     sniped_lines = [
         f"{rank_badge(r)} <@{uid}> — **{n}** times" for r, uid, n in stats["sniped_rows"][:TOP_N]
     ]
-    embed.add_field(
-        name="👀 Most Sniped",
-        value="\n".join(sniped_lines) or "Nobody sniped yet!",
-        inline=False,
+    sections.append(
+        "## 👀 Most Sniped\n" + ("\n".join(sniped_lines) or "Nobody sniped yet!")
     )
 
     if stats["best_day"]:
@@ -1006,15 +1029,22 @@ def build_guild_embed(guild_id: int) -> discord.Embed:
         day_text = f"{fmt_day(day)}: **{n}** snipes"
     else:
         day_text = "—"
-    embed.add_field(name="🔥 Most Snipes in a Day", value=day_text, inline=True)
-
     if stats["best_sniped_day"]:
         (day, uid), n = stats["best_sniped_day"]
         sd_text = f"<@{uid}>: **{n}** times on {fmt_day(day)}"
     else:
         sd_text = "—"
-    embed.add_field(name="💀 Most Sniped in a Day", value=sd_text, inline=True)
+    sections.append(
+        "## 📊 Other Statistics\n"
+        f"**Most Snipes in a Day**\n{day_text}\n"
+        f"**Most Sniped in a Day**\n{sd_text}"
+    )
 
+    embed = discord.Embed(
+        description="\n\n".join(sections),
+        color=discord.Color.gold(),
+        timestamp=datetime.now(timezone.utc),
+    )
     embed.set_footer(text="Katheryne • Press a button below • Last updated")
     return embed
 
@@ -1034,7 +1064,9 @@ class GuildView(discord.ui.View):
     )
     async def card(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(
-            embed=build_card(interaction.guild_id, interaction.user), ephemeral=True
+            embed=build_card(interaction.guild_id, interaction.user),
+            ephemeral=True,
+            delete_after=60,
         )
 
     @discord.ui.button(
@@ -1060,7 +1092,7 @@ class GuildView(discord.ui.View):
             )
             msg = "💤 You've opted out of Donut Buddies. Press the button again to rejoin. This applies from the next reset."
         db.commit()
-        await interaction.response.send_message(msg, ephemeral=True)
+        await interaction.response.send_message(msg, ephemeral=True, delete_after=60)
 
 
 class DonutPromptView(discord.ui.View):
@@ -1107,28 +1139,89 @@ client = Katheryne()
 tree = client.tree
 
 
-async def update_guild(guild_id: int):
-    """Create or edit the Adventurer's Guild message."""
+async def update_guild(guild_id: int) -> str | None:
+    """Create or edit the Adventurer's Guild message, returning its URL on success."""
     guild = client.get_guild(guild_id)
     if guild is None:
-        return
+        return None
     channel = get_channel_cfg(guild, "leaderboard_channel")
     if channel is None:
-        return
+        return None
     embed = build_guild_embed(guild_id)
+    operation = "fetch the existing message"
     try:
         msg_id = get_cfg(guild_id, "leaderboard_message")
+        stale_message = None
         if msg_id:
             try:
                 msg = await channel.fetch_message(int(msg_id))
-                await msg.edit(embed=embed, view=GuildView())
-                return
+                operation = "edit the existing message"
+                updated = await msg.edit(embed=embed, view=GuildView())
+                if not updated.embeds or updated.embeds[0].description != embed.description:
+                    stale_message = msg
+                    actual_description = (
+                        updated.embeds[0].description
+                        if updated.embeds
+                        else "(no embed returned)"
+                    )
+                    print(
+                        f"Discord returned unexpected Adventurer's Guild embed for message "
+                        f"{updated.id}. Expected: {embed.description!r}; "
+                        f"received: {actual_description!r}"
+                    )
             except discord.NotFound:
-                pass
-        msg = await channel.send(embed=embed, view=GuildView())
-        set_cfg(guild_id, "leaderboard_message", msg.id)
+                updated = None
+        else:
+            updated = None
+        if updated is None or stale_message is not None:
+            if stale_message is not None:
+                print(
+                    f"Discord did not apply the Adventurer's Guild embed to message "
+                    f"{stale_message.id}; posting a replacement."
+                )
+            operation = "send a replacement message"
+            updated = await channel.send(embed=embed, view=GuildView())
+            if not updated.embeds or updated.embeds[0].description != embed.description:
+                actual_description = (
+                    updated.embeds[0].description
+                    if updated.embeds
+                    else "(no embed returned)"
+                )
+                print(
+                    f"Discord returned unexpected Adventurer's Guild embed for replacement "
+                    f"message {updated.id}. Expected: {embed.description!r}; "
+                    f"received: {actual_description!r}"
+                )
+                return None
+            set_cfg(guild_id, "leaderboard_message", updated.id)
+            if stale_message is not None:
+                try:
+                    await stale_message.delete()
+                except discord.NotFound:
+                    pass
+                except discord.HTTPException as e:
+                    print(
+                        f"Could not delete stale Adventurer's Guild message "
+                        f"{stale_message.id}: {e}"
+                    )
+        return updated.jump_url
+    except discord.Forbidden as e:
+        missing = []
+        if guild.me is not None:
+            permissions = channel.permissions_for(guild.me)
+            if operation == "send a replacement message":
+                for permission in ("view_channel", "send_messages", "embed_links"):
+                    if not getattr(permissions, permission):
+                        missing.append(permission)
+        detail = f" Missing channel permissions: {', '.join(missing)}." if missing else ""
+        print(
+            f"Discord denied permission to {operation} in #{channel.name}: "
+            f"{e}.{detail}"
+        )
+        return None
     except discord.HTTPException as e:
-        print(f"Could not update the Adventurer's Guild message: {e}")
+        print(f"Could not {operation} in #{channel.name}: {e}")
+        return None
 
 
 @tasks.loop(minutes=10)
@@ -1214,7 +1307,7 @@ async def rescan(channel, after, is_snipes: bool) -> int:
     return len(msgs)
 
 
-async def sync_guild(guild: discord.Guild) -> int:
+async def sync_guild(guild: discord.Guild) -> tuple[int, str | None]:
     """Rescan every tracked channel, run any due weekly reset, refresh the Guild."""
     gid = guild.id
     start, _ = period_bounds(gid)
@@ -1245,8 +1338,8 @@ async def sync_guild(guild: discord.Guild) -> int:
         scanned += await scan_recap(ch)  # before the reset so last week's reactions count
 
     await maybe_reset(guild)
-    await update_guild(gid)
-    return scanned
+    updated = await update_guild(gid)
+    return scanned, updated
 
 
 _synced = False
@@ -1261,11 +1354,16 @@ async def on_ready():
     _synced = True
     for guild in client.guilds:
         try:
-            scanned = await sync_guild(guild)
-            print(f"[{guild.name}] scanned {scanned} messages")
+            scanned, message_url = await sync_guild(guild)
+            result = (
+                f"leaderboard refreshed: {message_url}"
+                if message_url
+                else "leaderboard was not updated"
+            )
+            print(f"[{guild.name}] scanned {scanned} messages; {result}")
         except Exception as e:
             print(f"[{guild.name}] sync failed: {e!r}")
-    print("Adventurer's Guild updated. Leave this running to track live, or press Ctrl+C to stop.")
+    print("Bot is online. Leave this running to track live, or press Ctrl+C to stop.")
     refresh_loop.start()
 
 
@@ -1672,8 +1770,18 @@ async def sync_cmd(interaction: discord.Interaction):
         await interaction.response.send_message("Run `/setup` first.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True, thinking=True)
-    scanned = await sync_guild(interaction.guild)
-    await interaction.followup.send(f"✅ Scanned {scanned} messages and refreshed.", ephemeral=True)
+    scanned, message_url = await sync_guild(interaction.guild)
+    if message_url:
+        message = (
+            f"✅ Scanned {scanned} messages and refreshed the Adventurer's Guild: "
+            f"{message_url}"
+        )
+    else:
+        message = (
+            f"⚠️ Scanned {scanned} messages, but could not update the Adventurer's Guild. "
+            "Check the bot console for Discord's error and required channel permissions."
+        )
+    await interaction.followup.send(message, ephemeral=True)
 
 
 @tree.error
