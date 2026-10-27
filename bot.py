@@ -841,7 +841,6 @@ def ranked(scores: dict):
 
 
 def compute_stats(guild_id):
-    sniper_pts = defaultdict(int)
     sniper_cnt = defaultdict(int)
     sniped_cnt = defaultdict(int)
     per_day = defaultdict(int)
@@ -849,7 +848,6 @@ def compute_stats(guild_id):
     gems = defaultdict(int)
 
     for sniper, sniped, day, pts in load_snipes(guild_id):
-        sniper_pts[sniper] += pts
         sniper_cnt[sniper] += 1
         sniped_cnt[sniped] += 1
         per_day[day] += 1
@@ -866,7 +864,7 @@ def compute_stats(guild_id):
     )
     return {
         "gem_rows": ranked(gems),
-        "sniper_rows": ranked(sniper_pts),
+        "sniper_rows": ranked(sniper_cnt),
         "sniper_cnt": sniper_cnt,
         "sniped_rows": ranked(sniped_cnt),
         "best_day": best_day,
