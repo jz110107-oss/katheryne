@@ -85,6 +85,11 @@ db.executescript(
         sniped_id INTEGER, created_at TEXT,
         PRIMARY KEY (message_id, sniped_id)
     );
+    CREATE TABLE IF NOT EXISTS snipe_messages (
+        guild_id INTEGER, channel_id INTEGER, message_id INTEGER, author_id INTEGER,
+        created_at TEXT, has_image INTEGER, targets TEXT,
+        PRIMARY KEY (guild_id, message_id)
+    );
     CREATE TABLE IF NOT EXISTS awards (
         guild_id INTEGER, user_id INTEGER, source TEXT, key TEXT,
         amount INTEGER, created_at TEXT, message_id INTEGER, channel_id INTEGER,
@@ -305,22 +310,57 @@ def add_award(guild_id, user_id, source, key, amount, when, message_id=None, cha
 # Snipes
 # ----------------------------------------------------------------------------
 def record_snipe(message: discord.Message) -> int:
-    """(Re)records the snipes for a message. Returns number of people sniped."""
-    db.execute("DELETE FROM snipes WHERE message_id=?", (message.id,))
+    """Match a photo and a tag from the same author posted within five minutes."""
+    if message.author.bot:
+        return 0
+
+    gid = message.guild.id
+    created_at = message.created_at.astimezone(timezone.utc)
+    created = created_at.isoformat()
+    targets = sorted({
+        u.id for u in message.mentions if not u.bot and u.id != message.author.id
+    })
+    db.execute(
+        "INSERT OR REPLACE INTO snipe_messages "
+        "(guild_id, channel_id, message_id, author_id, created_at, has_image, targets) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (gid, message.channel.id, message.id, message.author.id, created,
+         int(has_image(message)), json.dumps(targets)),
+    )
+
+    # A tag-only post can arrive before or after the photo. Re-evaluate nearby
+    # candidates so either ordering (and edits) produces the same result.
+    lower = (created_at - timedelta(minutes=5)).isoformat()
+    upper = (created_at + timedelta(minutes=5)).isoformat()
+    rows = db.execute(
+        "SELECT message_id, author_id, created_at, has_image, targets "
+        "FROM snipe_messages WHERE guild_id=? AND channel_id=? "
+        "AND created_at BETWEEN ? AND ?",
+        (gid, message.channel.id, lower, upper),
+    ).fetchall()
+    photos = [r for r in rows if r["has_image"]]
+    tags = [r for r in rows if json.loads(r["targets"])]
+    affected_photos = {p["message_id"] for p in photos}
+    for photo_id in affected_photos:
+        db.execute("DELETE FROM snipes WHERE message_id=?", (photo_id,))
+
     count = 0
-    if not message.author.bot and has_image(message):
-        created = message.created_at.astimezone(timezone.utc).isoformat()
-        targets = {
-            u.id for u in message.mentions if not u.bot and u.id != message.author.id
-        }
-        for target in targets:
-            db.execute(
-                "INSERT OR IGNORE INTO snipes "
-                "(guild_id, message_id, sniper_id, sniped_id, created_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (message.guild.id, message.id, message.author.id, target, created),
-            )
-            count += 1
+    for photo in photos:
+        photo_time = datetime.fromisoformat(photo["created_at"])
+        for tag in tags:
+            if tag["author_id"] != photo["author_id"]:
+                continue
+            tag_time = datetime.fromisoformat(tag["created_at"])
+            if abs((tag_time - photo_time).total_seconds()) > 300:
+                continue
+            for target in json.loads(tag["targets"]):
+                db.execute(
+                    "INSERT OR IGNORE INTO snipes "
+                    "(guild_id, message_id, sniper_id, sniped_id, created_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (gid, photo["message_id"], photo["author_id"], target, photo["created_at"]),
+                )
+                count += 1
     db.commit()
     return count
 
@@ -1309,6 +1349,15 @@ def reconcile_snipes(guild_id, seen_ids, start):
         in_range = start is None or datetime.fromisoformat(r["created_at"]) >= start
         if in_range and r["message_id"] not in seen_ids:
             db.execute("DELETE FROM snipes WHERE message_id=?", (r["message_id"],))
+    candidates = db.execute(
+        "SELECT message_id, created_at FROM snipe_messages WHERE guild_id=?",
+        (guild_id,),
+    ).fetchall()
+    for r in candidates:
+        in_range = start is None or datetime.fromisoformat(r["created_at"]) >= start
+        if in_range and r["message_id"] not in seen_ids:
+            db.execute("DELETE FROM snipe_messages WHERE guild_id=? AND message_id=?",
+                       (guild_id, r["message_id"]))
     db.commit()
 
 
@@ -1439,11 +1488,14 @@ async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
     if payload.guild_id is None:
         return
     a = db.execute("DELETE FROM snipes WHERE message_id=?", (payload.message_id,)).rowcount
+    c = db.execute(
+        "DELETE FROM snipe_messages WHERE message_id=?", (payload.message_id,)
+    ).rowcount
     b = db.execute(
         "DELETE FROM awards WHERE message_id=? AND source != 'donut'", (payload.message_id,)
     ).rowcount
     db.commit()
-    if a or b:
+    if a or b or c:
         await update_guild(payload.guild_id)
 
 
