@@ -96,6 +96,8 @@ Commands marked 🔒 need the **Manage Server** permission.
 | 🔒 `/addsocial` / `/removesocial` | Register or unregister a socials channel |
 | 🔒 `/addtheme theme` | Add a Photo of the Week theme |
 | 🔒 `/givegems user amount reason` | Add or remove primogems manually (negative amounts work). Useful for fixing mistakes. |
+| 🔒 `/fixdonuts` | Repair this week's groups that contain people who left the server; unaffected groups stay unchanged. |
+| `/viewdonuts` | Show current opt-in/opt-out lists and this week's groupings. |
 | 🔒 `/sync` | Rescan all channels, run any due reset, and refresh the Guild |
 | `/mystats [user]` | Show your (or someone's) Adventurer card |
 | `/pointvalues` | List anyone not worth the default 1 |

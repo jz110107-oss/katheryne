@@ -661,6 +661,93 @@ async def form_donut_groups(guild: discord.Guild, cycle_id: str, cycle_start: da
     return True
 
 
+async def repair_donut_groups(guild: discord.Guild, cycle_id: str) -> tuple[int, int]:
+    """Replace only groups containing departed members; return repaired and new group counts."""
+    rows = db.execute(
+        "SELECT * FROM donut_groups WHERE guild_id=? AND cycle=? AND channel_id IS NOT NULL",
+        (guild.id, cycle_id),
+    ).fetchall()
+    broken = [
+        row for row in rows
+        if any(guild.get_member(uid) is None or guild.get_member(uid).bot
+               for uid in group_members(row))
+    ]
+    if not broken:
+        return 0, 0
+
+    affected = list(broken)
+    # With one broken group, merge its remaining people into one randomly selected
+    # existing group, leaving every other group alone.
+    if len(broken) == 1:
+        candidates = [row for row in rows if row["id"] != broken[0]["id"]]
+        if not candidates:
+            raise ValueError("There is no other Donut Buddy group to merge with.")
+        affected.append(random.choice(candidates))
+
+    member_ids = []
+    for row in affected:
+        for uid in group_members(row):
+            member = guild.get_member(uid)
+            if member is not None and not member.bot and uid not in member_ids:
+                member_ids.append(uid)
+    groups = make_groups(member_ids, set())
+    if not groups:
+        raise ValueError("No current server members remain in the affected groups.")
+
+    # Create replacements first so a Discord failure leaves the old groups intact.
+    created = []
+    category = find_category(guild)
+    try:
+        for ids in groups:
+            members = [guild.get_member(uid) for uid in ids]
+            channel = await guild.create_text_channel(
+                "donut-" + "-".join(channel_slug(member) for member in members),
+                category=category,
+                overwrites=donut_overwrites(guild, members),
+                topic="Donut Buddies: share a meal, then post a photo tagging each other!",
+                reason="Katheryne: repair current Donut Buddy groups",
+            )
+            cur = db.execute(
+                "INSERT INTO donut_groups (guild_id, cycle, channel_id, members, status) "
+                "VALUES (?, ?, ?, ?, 'open')",
+                (guild.id, cycle_id, channel.id, ",".join(str(uid) for uid in ids)),
+            )
+            db.commit()
+            created.append((channel, cur.lastrowid, members))
+            reset_ts = next_reset_ts(guild.id, cycle_start_for(guild.id, datetime.now(timezone.utc)))
+            mentions = " ".join(member.mention for member in members)
+            await channel.send(
+                f"🍩 {mentions}\nKatheryne updated this week's Donut Buddies group. "
+                f"Meet for a meal this week, then post a photo tagging "
+                f"{'everyone else' if len(members) > 2 else 'your buddy'} here. "
+                f"New buddies are paired <t:{reset_ts}:R>.",
+                allowed_mentions=discord.AllowedMentions(users=True),
+            )
+    except (discord.Forbidden, discord.HTTPException):
+        for channel, row_id, _ in created:
+            try:
+                await channel.delete(reason="Katheryne: rolling back failed Donut Buddy repair")
+            except discord.HTTPException:
+                pass
+            db.execute("DELETE FROM donut_groups WHERE id=?", (row_id,))
+        db.commit()
+        raise
+
+    for row in affected:
+        channel = guild.get_channel(row["channel_id"])
+        if channel:
+            try:
+                await channel.delete(reason="Katheryne: replacing incomplete Donut Buddy group")
+            except discord.HTTPException:
+                pass
+        db.execute(
+            "UPDATE donut_groups SET channel_id=NULL, status='repaired' WHERE id=?",
+            (row["id"],),
+        )
+    db.commit()
+    return len(broken), len(groups)
+
+
 async def finalize_old_groups(guild: discord.Guild, new_cycle_id: str):
     """Delete last cycle's donut channels. A group whose photo is awaiting its
     dining-hall/elsewhere answer gets one extra cycle; after that it defaults to
@@ -1852,6 +1939,86 @@ async def mystats(interaction: discord.Interaction, user: discord.Member | None 
     await interaction.response.send_message(
         embed=build_card(interaction.guild_id, target), ephemeral=True
     )
+
+
+@tree.command(name="fixdonuts", description="Repair current Donut Buddy groups with departed members")
+@app_commands.guild_only()
+@app_commands.default_permissions(manage_guild=True)
+@admin_only
+async def fix_donuts(interaction: discord.Interaction):
+    guild = interaction.guild
+    cycle_id = cycle_start_for(guild.id, datetime.now(timezone.utc)).isoformat()
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        await guild.chunk(cache=True)
+        repaired, created = await repair_donut_groups(guild, cycle_id)
+    except ValueError as e:
+        await interaction.followup.send(str(e), ephemeral=True)
+        return
+    except (discord.Forbidden, discord.HTTPException) as e:
+        print(f"Could not repair Donut Buddy groups: {e}")
+        await interaction.followup.send(
+            "I couldn't create the replacement channels. The existing groups are still in place; "
+            "check the bot's channel permissions and try again.", ephemeral=True
+        )
+        return
+    if not repaired:
+        message = "✅ All current Donut Buddy groups already have their members."
+    else:
+        message = (
+            f"✅ Repaired {repaired} incomplete group{'s' if repaired != 1 else ''} "
+            f"and created {created} replacement group{'s' if created != 1 else ''}. "
+            "All other groups were left as they were."
+        )
+    await interaction.followup.send(message, ephemeral=True)
+
+
+@tree.command(name="viewdonuts", description="View this week's Donut Buddy opt-ins and groups")
+@app_commands.guild_only()
+async def view_donuts(interaction: discord.Interaction):
+    guild = interaction.guild
+    gid = guild.id
+    await guild.chunk(cache=True)
+    cycle_id = cycle_start_for(gid, datetime.now(timezone.utc)).isoformat()
+    optouts = {
+        row["user_id"]
+        for row in db.execute("SELECT user_id FROM donut_optouts WHERE guild_id=?", (gid,))
+    }
+    humans = sorted((member for member in guild.members if not member.bot), key=lambda m: m.display_name.lower())
+    opted_in = [member.mention for member in humans if member.id not in optouts]
+    opted_out = [member.mention for member in humans if member.id in optouts]
+    rows = db.execute(
+        "SELECT * FROM donut_groups WHERE guild_id=? AND cycle=? AND channel_id IS NOT NULL ORDER BY id",
+        (gid, cycle_id),
+    ).fetchall()
+    group_lines = []
+    for index, row in enumerate(rows, 1):
+        names = [f"<@{uid}>" for uid in group_members(row)]
+        channel = guild.get_channel(row["channel_id"])
+        location = channel.mention if channel else "channel unavailable"
+        group_lines.append(f"**Group {index}** ({location}): " + ", ".join(names))
+    sections = [
+        "**Opted in**\n" + ("\n".join(opted_in) or "Nobody"),
+        "**Opted out**\n" + ("\n".join(opted_out) or "Nobody"),
+        "**This week's groups**\n" + ("\n".join(group_lines) or "No groups have been created."),
+    ]
+    # Keep Discord's message limit while preserving complete information for large servers.
+    content = "\n\n".join(sections)
+    if len(content) <= 1900:
+        await interaction.response.send_message(content, ephemeral=True)
+        return
+    chunks = []
+    current = ""
+    for line in content.splitlines():
+        if len(current) + len(line) + 1 > 1900:
+            chunks.append(current)
+            current = ""
+        current += ("\n" if current else "") + line
+    if current:
+        chunks.append(current)
+    await interaction.response.send_message(chunks[0], ephemeral=True)
+    for chunk in chunks[1:]:
+        await interaction.followup.send(chunk, ephemeral=True)
 
 
 @tree.command(name="sync", description="Rescan channels, run any due weekly reset, refresh the Guild")
