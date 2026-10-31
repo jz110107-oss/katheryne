@@ -1531,13 +1531,17 @@ async def on_ready():
     _synced = True
     for guild in client.guilds:
         try:
+            # Guild-scoped registration makes new and updated commands available
+            # immediately instead of waiting for global command propagation.
+            tree.copy_global_to(guild=discord.Object(id=guild.id))
+            await tree.sync(guild=discord.Object(id=guild.id))
             scanned, message_url = await sync_guild(guild)
             result = (
                 f"leaderboard refreshed: {message_url}"
                 if message_url
                 else "leaderboard was not updated"
             )
-            print(f"[{guild.name}] scanned {scanned} messages; {result}")
+            print(f"[{guild.name}] slash commands synced; scanned {scanned} messages; {result}")
         except Exception as e:
             print(f"[{guild.name}] sync failed: {e!r}")
     print("Bot is online. Leave this running to track live, or press Ctrl+C to stop.")
@@ -1978,6 +1982,7 @@ async def fix_donuts(interaction: discord.Interaction):
 async def view_donuts(interaction: discord.Interaction):
     guild = interaction.guild
     gid = guild.id
+    await interaction.response.defer(ephemeral=True, thinking=True)
     await guild.chunk(cache=True)
     cycle_id = cycle_start_for(gid, datetime.now(timezone.utc)).isoformat()
     optouts = {
@@ -2005,7 +2010,7 @@ async def view_donuts(interaction: discord.Interaction):
     # Keep Discord's message limit while preserving complete information for large servers.
     content = "\n\n".join(sections)
     if len(content) <= 1900:
-        await interaction.response.send_message(content, ephemeral=True)
+        await interaction.followup.send(content, ephemeral=True)
         return
     chunks = []
     current = ""
@@ -2016,7 +2021,7 @@ async def view_donuts(interaction: discord.Interaction):
         current += ("\n" if current else "") + line
     if current:
         chunks.append(current)
-    await interaction.response.send_message(chunks[0], ephemeral=True)
+    await interaction.followup.send(chunks[0], ephemeral=True)
     for chunk in chunks[1:]:
         await interaction.followup.send(chunk, ephemeral=True)
 
